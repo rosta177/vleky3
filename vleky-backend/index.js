@@ -8,7 +8,7 @@ const multer = require("multer");
 const { createHourlyPin, createDailyPin } = require("./services/iglooAccess");
 
 const app = express();
-const PORT = 3000;
+const PORT = 3100;
 
 const knexConfig = require("./db/knex");
 const env = process.env.NODE_ENV || "development";
