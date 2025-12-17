@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Půjčvlek – správa vleků</title>
+
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
+  <style>
+    body { background:#f3f4f6; }
+    #map { height: 320px; border-radius: 12px; }
+    .card { border-radius: 16px; }
+    .dropzone {
+      border: 2px dashed #cbd5e1;
+      border-radius: 12px;
+      padding: 18px;
+      background: #fff;
+      text-align: center;
+      cursor: pointer;
+      user-select: none;
+    }
+    .dropzone.dragover { background: #f8fafc; border-color:#94a3b8; }
+    .thumbs { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+    .thumb { width: 92px; height: 92px; border-radius: 10px; overflow:hidden; border:1px solid #e2e8f0; background:#fff; }
+    .thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+    .small-muted { color:#64748b; font-size: 0.9rem; }
+    code.k { background:#0f172a; color:#e2e8f0; padding:2px 6px; border-radius:6px; }
+  </style>
+</head>
+
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark" style="background:#2563eb;">
+  <div class="container">
+    <a class="navbar-brand fw-semibold" href="#">Půjčvlek – admin</a>
+  </div>
+</nav>
+
+<div class="container py-4">
+
+  <div class="row g-3">
+    <div class="col-12 col-lg-8">
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <h5 class="mb-1">Přidat / upravit vlek</h5>
+          <div class="small-muted mb-3">
+            Název je povinný. Souřadnice můžeš vyplnit ručně, přes <b>Moje pozice</b> nebo tlačítkem <b>Najít podle adresy</b>.
+          </div>
+
+          <form id="trailerForm" class="row g-3">
+            <input type="hidden" id="editingId" value="" />
+
+            <div class="col-md-6">
+              <label class="form-label">Název *</label>
+              <input class="form-control" id="name" required placeholder="Brzděný plato 3,5t">
+            </div>
+
+            <div class="col-md-3">
+              <label class="form-label">Celková hmotnost (kg)</label>
+              <input class="form-control" id="total_weight_kg" type="number" step="1" placeholder="3500">
+            </div>
+
+            <div class="col-md-3">
+              <label class="form-label">Nosnost (kg)</label>
+              <input class="form-control" id="payload_kg" type="number" step="1" placeholder="2700">
+            </div>
+
+            <div class="col-md-3">
+              <label class="form-label">Šířka ložné plochy (m)</label>
+              <input class="form-control" id="bed_width_m" type="number" step="0.01" placeholder="2.0">
+            </div>
+
+            <div class="col-md-3">
+              <label class="form-label">Délka ložné plochy (m)</label>
+              <input class="form-control" id="bed_length_m" type="number" step="0.01" placeholder="4.0">
+            </div>
+
+            <div class="col-md-3">
+              <label class="form-label">Zakrytí</label>
+              <select class="form-select" id="cover">
+                <option value="">— vyber —</option>
+                <option value="bez">bez</option>
+                <option value="plachta">plachta</option>
+                <option value="hardtop">hardtop</option>
+              </select>
+            </div>
+
+            <div class="col-md-3">
+              <label class="form-label">Majitel</label>
+              <input class="form-control" id="owner_name" placeholder="Rosta">
+            </div>
+
+            <div class="col-md-3">
+              <label class="form-label">Cena za den (Kč)</label>
+              <input class="form-control" id="price_per_day_czk" type="number" step="1" placeholder="800">
+            </div>
+
+            <div class="col-md-6">
+              <label class="form-label">Lokalita (adresa / popis)</label>
+              <div class="input-group">
+                <input class="form-control" id="location" placeholder="Plzeň – Borská pole">
+                <button type="button" class="btn btn-outline-secondary" id="geocodeBtn">Najít</button>
+              </div>
+            </div>
+
+            <div class="col-md-3">
+              <label class="form-label">Lat (zem. šířka)</label>
+              <input class="form-control" id="lat" type="number" step="0.000001" placeholder="49.75">
+            </div>
+
+            <div class="col-md-3">
+              <label class="form-label">Lng (zem. délka)</label>
+              <input class="form-control" id="lng" type="number" step="0.000001" placeholder="13.38">
+            </div>
+
+            <div class="col-12">
+              <div class="d-flex gap-2 flex-wrap">
+                <button type="button" class="btn btn-outline-primary" id="myPosBtn">Moje pozice</button>
+                <button type="button" class="btn btn-outline-secondary" id="setOnMapBtn">Nastavit do mapy</button>
+                <span class="small-muted align-self-center" id="posStatus"></span>
+              </div>
+            </div>
+
+            <div class="col-12">
+              <label class="form-label">Fotografie vleku</label>
+              <div id="dropzone" class="dropzone">
+                Přetáhni obrázky sem nebo klikni pro výběr z disku / galerie.
+                <div class="small-muted mt-1">Podporované JPG/PNG. Doporučeno max ~5 MB / fotka.</div>
+              </div>
+              <input id="photosInput" type="file" accept="image/*" multiple style="display:none;" />
+              <div id="thumbs" class="thumbs"></div>
+            </div>
+
+            <div class="col-12">
+              <label class="form-label">Popis</label>
+              <textarea class="form-control" id="description" rows="3" placeholder="Krátký popis vleku..."></textarea>
+            </div>
+
+            <div class="col-12">
+              <hr>
+              <div class="row g-3 align-items-end">
+                <div class="col-md-6">
+                  <label class="form-label">Iglohome device_id (zámek)</label>
+                  <input class="form-control" id="lockDeviceId" placeholder="SP2X2408136a">
+                  <div class="form-text">Přiřazení zámku se dělá pro konkrétní vlek (musí být uložený / vybraný).</div>
+                </div>
+                <div class="col-md-3">
+                  <button type="button" class="btn btn-outline-primary w-100" id="btnAssignLock">Přiřadit zámek</button>
+                </div>
+                <div class="col-md-3">
+                  <button type="submit" class="btn btn-success w-100" id="saveBtn">Uložit vlek</button>
+                </div>
+                <div class="col-12">
+                  <div id="lockStatus" class="small-muted"></div>
+                  <div id="saveStatus" class="small-muted"></div>
+                </div>
+              </div>
+            </div>
+
+          </form>
+        </div>
+      </div>
+
+      <div class="card shadow-sm mt-3">
+        <div class="card-body">
+          <h6 class="mb-2">Mapa</h6>
+          <div id="map"></div>
+          <div class="small-muted mt-2">
+            Tip: klikni do mapy pro nastavení Lat/Lng. Tlačítko <b>Nastavit do mapy</b> posune marker na zadané souřadnice.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-12 col-lg-4">
+      <div class="card shadow-sm">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">Seznam vleků</h5>
+            <button class="btn btn-primary" id="loadBtn">Načíst vleky</button>
+          </div>
+          <div class="small-muted mt-2">Data se načítají z API <code class="k">/trailers</code>.</div>
+
+          <div class="table-responsive mt-3">
+            <table class="table table-sm align-middle">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Název</th>
+                  <th>Lokalita</th>
+                  <th>Cena/den</th>
+                  <th style="width:160px;">Akce</th>
+                </tr>
+              </thead>
+              <tbody id="trailersTbody">
+                <tr><td colspan="5" class="small-muted">Klikni na „Načíst vleky“.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div id="listStatus" class="small-muted"></div>
+        </div>
+      </div>
+
+      <div class="card shadow-sm mt-3">
+        <div class="card-body">
+          <h5 class="mb-2">Rezervace (základ)</h5>
+          <div class="small-muted mb-3">Zatím jednoduchý formulář (kvůli PINu ho budeme dál vylepšovat).</div>
+
+          <form id="reservationForm" class="row g-2">
+            <div class="col-12">
+              <label class="form-label">Vlek (ID)</label>
+              <input class="form-control" name="trailerId" id="reservationTrailerId" placeholder="např. 1">
+            </div>
+            <div class="col-12">
+              <label class="form-label">Od</label>
+              <input class="form-control" name="from" id="reservationFrom" type="datetime-local">
+            </div>
+            <div class="col-12">
+              <label class="form-label">Do</label>
+              <input class="form-control" name="to" id="reservationTo" type="datetime-local">
+            </div>
+            <div class="col-12">
+              <label class="form-label">Jméno</label>
+              <input class="form-control" name="customerName" placeholder="Jan Novák">
+            </div>
+            <div class="col-12">
+              <label class="form-label">Email</label>
+              <input class="form-control" name="customerEmail" type="email" placeholder="jan@novak.cz">
+            </div>
+            <div class="col-12">
+              <label class="form-label">Telefon</label>
+              <input class="form-control" name="customerPhone" placeholder="+420...">
+            </div>
+            <div class="col-12">
+              <div id="reservationPrice" class="small-muted"></div>
+              <div id="reservationStatus" class="small-muted"></div>
+            </div>
+            <div class="col-12">
+              <button class="btn btn-outline-primary w-100" type="submit">Uložit rezervaci</button>
+            </div>
+          </form>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+  // ----------------------------
+  // Helpers
+  // ----------------------------
+  async function safeJson(res) {
+    const ct = res.headers.get("content-type") || "";
+    if (ct.includes("application/json")) return await res.json();
+    const txt = await res.text().catch(() => "");
+    throw new Error("Server nevrátil JSON. " + txt.slice(0, 200));
+  }
+
+  async function fetchJson(url, options) {
+    const res = await fetch(url, options);
+    if (!res.ok) {
+      let detail = "";
+      try { detail = await res.text(); } catch (e) {}
+      throw new Error(`HTTP ${res.status} ${res.statusText} – ${detail.slice(0, 200)}`);
+    }
+    return await safeJson(res);
+  }
+
+  async function fetchJsonWithFallback(primaryUrl, fallbackUrl, options) {
+    try {
+      return await fetchJson(primaryUrl, options);
+    } catch (e) {
+      // pokud 404, zkus fallback
+      if (String(e.message).includes("HTTP 404") && fallbackUrl) {
+        return await fetchJson(fallbackUrl, options);
+      }
+      throw e;
+    }
+  }
+
+  function num(v) {
+    if (v === "" || v === null || v === undefined) return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  // ----------------------------
+  // DOM
+  // ----------------------------
+  const loadBtn = document.getElementById("loadBtn");
+  const trailersTbody = document.getElementById("trailersTbody");
+  const listStatus = document.getElementById("listStatus");
+
+  const trailerForm = document.getElementById("trailerForm");
+  const editingIdEl = document.getElementById("editingId");
+  const saveStatus = document.getElementById("saveStatus");
+
+  const posStatus = document.getElementById("posStatus");
+  const myPosBtn = document.getElementById("myPosBtn");
+  const geocodeBtn = document.getElementById("geocodeBtn");
+  const setOnMapBtn = document.getElementById("setOnMapBtn");
+
+  const dropzone = document.getElementById("dropzone");
+  const photosInput = document.getElementById("photosInput");
+  const thumbs = document.getElementById("thumbs");
+
+  const btnAssignLock = document.getElementById("btnAssignLock");
+  const lockStatus = document.getElementById("lockStatus");
+
+  const reservationForm = document.getElementById("reservationForm");
+  const reservationStatus = document.getElementById("reservationStatus");
+  const reservationPrice = document.getElementById("reservationPrice");
+
+  // Inputs
+  const el = (id) => document.getElementById(id);
+  const fields = {
+    name: el("name"),
+    total_weight_kg: el("total_weight_kg"),
+    payload_kg: el("payload_kg"),
+    bed_width_m: el("bed_width_m"),
+    bed_length_m: el("bed_length_m"),
+    cover: el("cover"),
+    location: el("location"),
+    lat: el("lat"),
+    lng: el("lng"),
+    price_per_day_czk: el("price_per_day_czk"),
+    owner_name: el("owner_name"),
+    description: el("description"),
+    lockDeviceId: el("lockDeviceId"),
+  };
+
+  let selectedFiles = [];
+  let currentTrailers = [];
+  let currentTrailer = null;
+
+  // ----------------------------
+  // Map
+  // ----------------------------
+  const map = L.map("map").setView([49.75, 13.38], 10);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19 }).addTo(map);
+  const marker = L.marker([49.75, 13.38], { draggable: true }).addTo(map);
+
+  function setLatLng(lat, lng, moveMap = true) {
+    fields.lat.value = lat;
+    fields.lng.value = lng;
+    marker.setLatLng([lat, lng]);
+    if (moveMap) map.setView([lat, lng], Math.max(map.getZoom(), 13));
+  }
+
+  marker.on("dragend", async () => {
+    const p = marker.getLatLng();
+    setLatLng(p.lat.toFixed(6), p.lng.toFixed(6), false);
+    await reverseGeocodeToLocation();
+  });
+
+  map.on("click", async (e) => {
+    setLatLng(e.latlng.lat.toFixed(6), e.latlng.lng.toFixed(6), true);
+    await reverseGeocodeToLocation();
+  });
+
+  setOnMapBtn.addEventListener("click", () => {
+    const lat = num(fields.lat.value);
+    const lng = num(fields.lng.value);
+    if (lat == null || lng == null) return;
+    setLatLng(lat, lng, true);
+  });
+
+  // ----------------------------
+  // Geolocation + Geocode
+  // ----------------------------
+  myPosBtn.addEventListener("click", () => {
+    posStatus.textContent = "Zjišťuji polohu…";
+    if (!navigator.geolocation) {
+      posStatus.textContent = "Geolokace není podporovaná.";
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        setLatLng(lat.toFixed(6), lng.toFixed(6), true);
+        posStatus.textContent = "OK.";
+        await reverseGeocodeToLocation();
+      },
+      (err) => {
+        posStatus.textContent = "Nelze získat polohu: " + err.message;
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  });
+
+  geocodeBtn.addEventListener("click", async () => {
+    const q = fields.location.value.trim();
+    if (!q) return;
+    posStatus.textContent = "Hledám adresu…";
+    try {
+      const data = await fetchJsonWithFallback(
+        `/geocode?q=${encodeURIComponent(q)}`,
+        `/api/geocode?q=${encodeURIComponent(q)}`
+      );
+      if (data && data.lat && data.lng) {
+        setLatLng(Number(data.lat).toFixed(6), Number(data.lng).toFixed(6), true);
+        posStatus.textContent = "OK.";
+      } else {
+        posStatus.textContent = "Adresa nenalezena.";
+      }
+    } catch (e) {
+      console.error(e);
+      posStatus.textContent = "Geocode chyba: " + e.message;
+    }
+  });
+
+  async function reverseGeocodeToLocation() {
+    const lat = num(fields.lat.value);
+    const lng = num(fields.lng.value);
+    if (lat == null || lng == null) return;
+    try {
+      const data = await fetchJsonWithFallback(
+        `/reverse-geocode?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`,
+        `/api/reverse-geocode?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`
+      );
+      if (data && data.location) fields.location.value = data.location;
+    } catch (e) {
+      // backend může reverse-geocode nemít – UI nesmí spadnout
+      console.warn("reverse-geocode failed:", e.message);
+    }
+  }
+
+  // ----------------------------
+  // Photos dropzone
+  // ----------------------------
+  function renderThumbs() {
+    thumbs.innerHTML = "";
+    for (const file of selectedFiles) {
+      const div = document.createElement("div");
+      div.className = "thumb";
+      const img = document.createElement("img");
+      img.src = URL.createObjectURL(file);
+      div.appendChild(img);
+      thumbs.appendChild(div);
+    }
+  }
+
+  dropzone.addEventListener("click", () => photosInput.click());
+
+  dropzone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dropzone.classList.add("dragover");
+  });
+
+  dropzone.addEventListener("dragleave", () => {
+    dropzone.classList.remove("dragover");
+  });
+
+  dropzone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("dragover");
+    const files = Array.from(e.dataTransfer.files || []).filter(f => f.type.startsWith("image/"));
+    selectedFiles.push(...files);
+    renderThumbs();
+  });
+
+  photosInput.addEventListener("change", () => {
+    const files = Array.from(photosInput.files || []).filter(f => f.type.startsWith("image/"));
+    selectedFiles.push(...files);
+    renderThumbs();
+    photosInput.value = "";
+  });
+
+  async function uploadSelectedPhotos() {
+    if (!selectedFiles.length) return [];
+    const fd = new FormData();
+    for (const f of selectedFiles) fd.append("photos", f);
+
+    // backend v některých verzích má /upload, někde /api/upload
+    try {
+      const res = await fetch("/upload", { method: "POST", body: fd });
+      if (res.ok) return await safeJson(res);
+    } catch (e) {}
+
+    const res2 = await fetch("/api/upload", { method: "POST", body: fd });
+    if (!res2.ok) {
+      const t = await res2.text().catch(()=>"");
+      throw new Error("Upload failed: " + t.slice(0,200));
+    }
+    return await safeJson(res2);
+  }
+
+  // ----------------------------
+  // Trailers CRUD
+  // ----------------------------
+  function resetForm() {
+    editingIdEl.value = "";
+    currentTrailer = null;
+    trailerForm.reset();
+    selectedFiles = [];
+    renderThumbs();
+    lockStatus.textContent = "";
+    saveStatus.textContent = "";
+  }
+
+  function fillForm(trailer) {
+    editingIdEl.value = trailer.id;
+    currentTrailer = trailer;
+
+    fields.name.value = trailer.name ?? "";
+    fields.total_weight_kg.value = trailer.total_weight_kg ?? "";
+    fields.payload_kg.value = trailer.payload_kg ?? "";
+    fields.bed_width_m.value = trailer.bed_width_m ?? "";
+    fields.bed_length_m.value = trailer.bed_length_m ?? "";
+    fields.cover.value = trailer.cover ?? "";
+    fields.location.value = trailer.location ?? "";
+    fields.lat.value = trailer.lat ?? "";
+    fields.lng.value = trailer.lng ?? "";
+    fields.price_per_day_czk.value = trailer.price_per_day_czk ?? trailer.pricePerDay ?? "";
+    fields.owner_name.value = trailer.owner_name ?? trailer.ownerName ?? "";
+    fields.description.value = trailer.description ?? "";
+
+    // lock – různá schémata
+    fields.lockDeviceId.value = trailer.device_id || trailer.lock_device_id || trailer.deviceId || "";
+
+    if (trailer.lat && trailer.lng) setLatLng(Number(trailer.lat).toFixed(6), Number(trailer.lng).toFixed(6), true);
+    selectedFiles = [];
+    renderThumbs();
+
+    // předvyplň ID do rezervací
+    document.getElementById("reservationTrailerId").value = trailer.id;
+    updateReservationPricePreview();
+  }
+
+  function rowActions(trailer) {
+    const wrap = document.createElement("div");
+    wrap.className = "d-flex gap-2";
+
+    const btnEdit = document.createElement("button");
+    btnEdit.className = "btn btn-sm btn-outline-secondary";
+    btnEdit.textContent = "Edit";
+    btnEdit.addEventListener("click", () => fillForm(trailer));
+
+    const btnDel = document.createElement("button");
+    btnDel.className = "btn btn-sm btn-outline-danger";
+    btnDel.textContent = "Smazat";
+    btnDel.addEventListener("click", async () => {
+      if (!confirm(`Smazat vlek #${trailer.id}?`)) return;
+      try {
+        await fetchJsonWithFallback(`/trailers/${trailer.id}`, `/api/trailers/${trailer.id}`, { method: "DELETE" });
+        listStatus.textContent = "Smazáno.";
+        await loadTrailers();
+        if (editingIdEl.value == String(trailer.id)) resetForm();
+      } catch (e) {
+        alert("Chyba: " + e.message);
+      }
+    });
+
+    wrap.appendChild(btnEdit);
+    wrap.appendChild(btnDel);
+    return wrap;
+  }
+
+  function renderTrailersTable(trailers) {
+    trailersTbody.innerHTML = "";
+    if (!trailers.length) {
+      trailersTbody.innerHTML = '<tr><td colspan="5" class="small-muted">Žádné vleky.</td></tr>';
+      return;
+    }
+
+    for (const t of trailers) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${t.id ?? ""}</td>
+        <td>${t.name ?? ""}</td>
+        <td>${t.location ?? ""}</td>
+        <td>${t.price_per_day_czk ?? t.pricePerDay ?? ""}</td>
+        <td></td>
+      `;
+      tr.children[4].appendChild(rowActions(t));
+      trailersTbody.appendChild(tr);
+    }
+  }
+
+  async function loadTrailers() {
+    listStatus.textContent = "Načítám…";
+    try {
+      const data = await fetchJsonWithFallback("/trailers", "/api/trailers");
+      currentTrailers = Array.isArray(data) ? data : (data.trailers || []);
+      renderTrailersTable(currentTrailers);
+      listStatus.textContent = "OK.";
+    } catch (e) {
+      console.error(e);
+      listStatus.textContent = "Chyba: " + e.message;
+      trailersTbody.innerHTML = '<tr><td colspan="5" class="text-danger">Chyba při načítání dat.</td></tr>';
+    }
+  }
+
+  loadBtn.addEventListener("click", loadTrailers);
+
+  trailerForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    saveStatus.textContent = "Ukládám…";
+
+    try {
+      // 1) upload fotek (pokud jsou)
+      let uploaded = [];
+      if (selectedFiles.length) {
+        uploaded = await uploadSelectedPhotos(); // může být array url / filenames podle backendu
+      }
+
+      // 2) payload
+      const payload = {
+        name: fields.name.value.trim(),
+        total_weight_kg: num(fields.total_weight_kg.value),
+        payload_kg: num(fields.payload_kg.value),
+        bed_width_m: num(fields.bed_width_m.value),
+        bed_length_m: num(fields.bed_length_m.value),
+        cover: fields.cover.value || null,
+        location: fields.location.value.trim() || null,
+        lat: num(fields.lat.value),
+        lng: num(fields.lng.value),
+        price_per_day_czk: num(fields.price_per_day_czk.value),
+        owner_name: fields.owner_name.value.trim() || null,
+        description: fields.description.value.trim() || null,
+        photos_json: Array.isArray(uploaded) ? JSON.stringify(uploaded) : JSON.stringify([])
+      };
+
+      if (!payload.name) {
+        saveStatus.textContent = "Název je povinný.";
+        return;
+      }
+
+      const id = editingIdEl.value;
+
+      if (!id) {
+        const created = await fetchJsonWithFallback("/trailers", "/api/trailers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        saveStatus.textContent = "✅ Uloženo";
+        await loadTrailers();
+        // auto edit newly created if API returns id
+        if (created && created.id) {
+          const t = currentTrailers.find(x => x.id === created.id) || created;
+          fillForm(t);
+        } else {
+          resetForm();
+        }
+      } else {
+        await fetchJsonWithFallback(`/trailers/${id}`, `/api/trailers/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        saveStatus.textContent = "✅ Uloženo";
+        await loadTrailers();
+      }
+
+      selectedFiles = [];
+      renderThumbs();
+
+    } catch (e) {
+      console.error(e);
+      saveStatus.textContent = "Chyba: " + e.message;
+    }
+  });
+
+  // ----------------------------
+  // Lock assign (supports both endpoint styles)
+  // ----------------------------
+  btnAssignLock.addEventListener("click", async () => {
+    const trailerId = editingIdEl.value;
+    const deviceId = fields.lockDeviceId.value.trim();
+
+    if (!trailerId) {
+      lockStatus.textContent = "Nejprve vyber nebo ulož vlek.";
+      return;
+    }
+    if (!deviceId) {
+      lockStatus.textContent = "Zadej device_id zámku.";
+      return;
+    }
+
+    lockStatus.textContent = "Ukládám zámek…";
+
+    // 1) prefer newer endpoint /api/trailers/:id/lock
+    try {
+      await fetchJson(`/api/trailers/${trailerId}/lock`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "igloohome", device_id: deviceId, name: "Zámek", active: true })
+      });
+      lockStatus.textContent = "✅ Zámek přiřazen";
+      await loadTrailers();
+      return;
+    } catch (e) {
+      // ignore and fallback
+      console.warn("lock api endpoint failed, fallback:", e.message);
+    }
+
+    // 2) fallback old endpoint /trailers/:id/assign-lock
+    try {
+      await fetchJsonWithFallback(`/trailers/${trailerId}/assign-lock`, `/api/trailers/${trailerId}/assign-lock`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deviceId })
+      });
+      lockStatus.textContent = "✅ Zámek přiřazen";
+      await loadTrailers();
+    } catch (e2) {
+      console.error(e2);
+      lockStatus.textContent = "Chyba: " + e2.message;
+    }
+  });
+
+  // ----------------------------
+  // Reservations
+  // ----------------------------
+  function updateReservationPricePreview() {
+    const trailerId = document.getElementById("reservationTrailerId").value;
+    const fromVal = document.getElementById("reservationFrom").value;
+    const toVal = document.getElementById("reservationTo").value;
+
+    const trailer = currentTrailers.find(t => String(t.id) === String(trailerId)) || currentTrailer;
+    if (!trailer || !fromVal || !toVal) {
+      reservationPrice.textContent = "";
+      return;
+    }
+
+    const fromDate = new Date(fromVal);
+    const toDate = new Date(toVal);
+
+    if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
+      reservationPrice.textContent = "";
+      return;
+    }
+    if (toDate <= fromDate) {
+      reservationPrice.textContent = "Konec musí být po začátku.";
+      return;
+    }
+
+    const msPerDay = 1000 * 60 * 60 * 24;
+    const diffMs = toDate.getTime() - fromDate.getTime();
+    const days = Math.ceil(diffMs / msPerDay);
+
+    const pricePerDay = Number(trailer.price_per_day_czk ?? trailer.pricePerDay ?? 0);
+    if (!pricePerDay) {
+      reservationPrice.textContent = "";
+      return;
+    }
+
+    const total = days * pricePerDay;
+    reservationPrice.textContent = `Předběžná cena: ${total} Kč (${days} den/dní, ${pricePerDay} Kč/den)`;
+  }
+
+  document.getElementById("reservationFrom").addEventListener("change", updateReservationPricePreview);
+  document.getElementById("reservationTo").addEventListener("change", updateReservationPricePreview);
+  document.getElementById("reservationTrailerId").addEventListener("change", updateReservationPricePreview);
+
+  reservationForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    reservationStatus.textContent = "Ukládám rezervaci…";
+
+    const formData = new FormData(reservationForm);
+    const payload = {
+      trailerId: formData.get("trailerId"),
+      from: formData.get("from"),
+      to: formData.get("to"),
+      customerName: formData.get("customerName"),
+      customerEmail: formData.get("customerEmail"),
+      customerPhone: formData.get("customerPhone"),
+    };
+
+    if (!payload.trailerId || !payload.from || !payload.to) {
+      reservationStatus.textContent = "Vyplň čas od/do (a musíš mít vybraný vlek).";
+      return;
+    }
+
+    try {
+      await fetchJsonWithFallback("/reservations", "/api/reservations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      reservationStatus.textContent = "✅ Rezervace uložena";
+    } catch (err) {
+      console.error(err);
+      reservationStatus.textContent = "Chyba: " + err.message;
+    }
+  });
+
+  // Start
+  loadTrailers();
+</script>
+
+</body>
+</html>
