@@ -5,6 +5,7 @@ const uploadRouter = require("./routes/upload");
 const dbTestRouter = require("./routes/db-test");
 const trailersRouter = require("./routes/trailers");
 const locksRouter = require("./routes/locks");
+const reservationsRouter = require("./routes/reservations");
 
 
 function createApp() {
@@ -25,6 +26,8 @@ function createApp() {
   app.use("/api/db-test", dbTestRouter);
   app.use("/api/trailers", trailersRouter);
   app.use("/api", locksRouter);
+  app.use("/api", reservationsRouter);
+
 
   return app;
 }
