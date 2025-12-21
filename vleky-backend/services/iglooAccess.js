@@ -7,7 +7,9 @@
 
 const axios = require("axios");
 const https = require("https");
-require("dotenv").config();
+const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
+
 
 const {
   IGLOO_CLIENT_ID,
@@ -15,6 +17,7 @@ const {
   IGLOO_TOKEN_URL,
   IGLOO_API_BASE,
   IGLOO_INSECURE_TLS, // optional: "1" => ignore TLS errors (dev only)
+  IGLOO_DEBUG,        // optional: "1" => log requests
 } = process.env;
 
 const TOKEN_URL = IGLOO_TOKEN_URL || "https://auth.igloohome.co/oauth2/token";
@@ -31,53 +34,37 @@ function requireEnv() {
   }
 }
 
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
 // Igloohome chce: YYYY-MM-DDTHH:00:00+hh:mm (minuty/sekundy vždy 00)
-function formatDateIgloo(date) {
+function formatDateIglooHour(date) {
   const d = new Date(date);
+  d.setMinutes(0, 0, 0);
 
   const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  const hours = String(d.getHours()).padStart(2, "0");
-
-  const minutes = "00";
-  const seconds = "00";
+  const month = pad2(d.getMonth() + 1);
+  const day = pad2(d.getDate());
+  const hours = pad2(d.getHours());
 
   const offsetMinutesTotal = -d.getTimezoneOffset();
   const sign = offsetMinutesTotal >= 0 ? "+" : "-";
-  const offsetHours = String(Math.floor(Math.abs(offsetMinutesTotal) / 60)).padStart(2, "0");
-  const offsetMinutes = String(Math.abs(offsetMinutesTotal) % 60).padStart(2, "0");
+  const offsetHours = pad2(Math.floor(Math.abs(offsetMinutesTotal) / 60));
+  const offsetMinutes = pad2(Math.abs(offsetMinutesTotal) % 60);
 
-  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}${sign}${offsetHours}:${offsetMinutes}`;
+  return `${year}-${month}-${day}T${hours}:00:00${sign}${offsetHours}:${offsetMinutes}`;
 }
+
 function floorToHour(date) {
   const d = new Date(date);
   d.setMinutes(0, 0, 0);
   return d;
 }
-// Igloohome ONETIME – pošleme i minuty (a klidně sekundy = 00)
-function formatDateIglooExact(date) {
-  const d = new Date(date);
 
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-
-  const hours = String(d.getHours()).padStart(2, "0");
-  const minutes = String(d.getMinutes()).padStart(2, "0");
-  const seconds = "00";
-
-  const offsetMinutesTotal = -d.getTimezoneOffset();
-  const sign = offsetMinutesTotal >= 0 ? "+" : "-";
-  const offsetHours = String(Math.floor(Math.abs(offsetMinutesTotal) / 60)).padStart(2, "0");
-  const offsetMinutes = String(Math.abs(offsetMinutesTotal) % 60).padStart(2, "0");
-
-  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}${sign}${offsetHours}:${offsetMinutes}`;
-}
-
+// „Další celá hodina“ (aby startDate nebyl v minulosti / probíhající hodině)
 function ceilToNextHour(date) {
   const d = new Date(date);
-  // pokud už je přesně na hodině, necháme; jinak posun na další hodinu
   if (d.getMinutes() !== 0 || d.getSeconds() !== 0 || d.getMilliseconds() !== 0) {
     d.setHours(d.getHours() + 1);
   }
@@ -85,6 +72,12 @@ function ceilToNextHour(date) {
   return d;
 }
 
+function clampInt(n, min, max, fallback) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return fallback;
+  const xi = Math.trunc(x);
+  return Math.max(min, Math.min(max, xi));
+}
 
 async function getAccessToken() {
   requireEnv();
@@ -116,8 +109,9 @@ async function iglooPost(path, bodyObj) {
   const url = `${API_BASE}${path}`;
 
   try {
-    // Debug: co posíláme (bez tokenu)
-    console.log("➡️ IGLOO POST", url, bodyObj);
+    if (IGLOO_DEBUG === "1") {
+      console.log("➡️ IGLOO POST", url, bodyObj);
+    }
 
     const res = await axios.post(url, bodyObj, {
       httpsAgent: insecureHttpsAgent,
@@ -128,6 +122,7 @@ async function iglooPost(path, bodyObj) {
       },
       timeout: 20000,
     });
+
     return res.data;
   } catch (err) {
     const details = err.response?.data || err.message || err;
@@ -161,36 +156,38 @@ async function getDevices() {
   return iglooGet("/devices");
 }
 
+// ONETIME: u vás to evidentně vyžaduje startDate NA CELOU HODINU.
+// Proto nepoužívat "Exact" s minutami -> invalid_request.
 async function createOneTimePin({ deviceId, startDate, accessName = "Reservation", variance = 1 }) {
   if (!deviceId) throw new Error("Chybí deviceId (ID zámku).");
   if (!startDate) throw new Error("Chybí startDate.");
 
+  // Igloo chce HH:00:00 a ideálně ne v minulosti -> vezmeme nejbližší další hodinu
+  const startH = ceilToNextHour(startDate);
+
   const body = {
-    variance,
-    startDate: formatDateIglooExact(startDate),
+    variance: clampInt(variance, 1, 10, 1), // kdyby Igloo povolovalo jen 1..10; když víš přesně, dej 1..5
+    startDate: formatDateIglooHour(startH),
     accessName,
   };
 
   return iglooPost(`/devices/${deviceId}/algopin/onetime`, body);
 }
 
-
-
 async function createHourlyPin({ deviceId, startDate, endDate, accessName = "Reservation" }) {
   if (!deviceId) throw new Error("Chybí deviceId.");
   if (!startDate) throw new Error("Chybí startDate.");
   if (!endDate) throw new Error("Chybí endDate.");
 
- const startH = floorToHour(startDate);
-const endH = ceilToNextHour(endDate);
+  const startH = floorToHour(startDate);
+  const endH = ceilToNextHour(endDate);
 
-const body = {
-  variance: 1,
-  startDate: formatDateIgloo(startH),
-  endDate: formatDateIgloo(endH),
-  accessName,
-};
-
+  const body = {
+    variance: 1,
+    startDate: formatDateIglooHour(startH),
+    endDate: formatDateIglooHour(endH),
+    accessName,
+  };
 
   return iglooPost(`/devices/${deviceId}/algopin/hourly`, body);
 }
@@ -199,9 +196,11 @@ async function createDailyPin({ deviceId, startDate, accessName = "Reservation" 
   if (!deviceId) throw new Error("Chybí deviceId.");
   if (!startDate) throw new Error("Chybí startDate.");
 
+  const startH = floorToHour(startDate);
+
   const body = {
     variance: 1,
-    startDate: formatDateIgloo(startDate),
+    startDate: formatDateIglooHour(startH),
     accessName,
   };
 
@@ -213,7 +212,9 @@ module.exports = {
   createOneTimePin,
   createHourlyPin,
   createDailyPin,
-  formatDateIgloo,
-  formatDateIglooExact,
-};
 
+  // export helperů pro debug / jiné soubory (volitelné)
+  formatDateIglooHour,
+  floorToHour,
+  ceilToNextHour,
+};

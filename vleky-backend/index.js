@@ -5,7 +5,7 @@ const path = require("path");
 const fs = require("fs");
 const multer = require("multer");
 
-const { createHourlyPin, createDailyPin } = require("./services/iglooAccess");
+const { createHourlyPin, createDailyPin, createOneTimePin } = require("./services/iglooAccess");
 
 const app = express();
 const PORT = 3100;
@@ -13,6 +13,18 @@ const PORT = 3100;
 const knexConfig = require("./db/knex");
 const env = process.env.NODE_ENV || "development";
 const knex = require("knex")(knexConfig[env]);
+
+function floorToHour(date) {
+  const d = new Date(date);
+  d.setMinutes(0, 0, 0);
+  return d;
+}
+
+function randomPin(len = 6) {
+  const min = 10 ** (len - 1);
+  const max = 10 ** len - 1;
+  return String(Math.floor(min + Math.random() * (max - min + 1)));
+}
 
 // --------- Upload fotek (multer) ---------
 
@@ -49,6 +61,15 @@ app.post("/api/upload", upload.single("photo"), (req, res) => {
     res.status(500).json({ error: "Upload failed" });
   }
 });
+
+function ceilToNextHour(date) {
+  const d = new Date(date);
+  if (d.getMinutes() !== 0 || d.getSeconds() !== 0 || d.getMilliseconds() !== 0) {
+    d.setHours(d.getHours() + 1);
+  }
+  d.setMinutes(0, 0, 0);
+  return d;
+}
 
 // -------------------- Rezervace / PINy (Igloohome) --------------------
 
@@ -135,7 +156,7 @@ app.post("/api/reservations/createPin", async (req, res) => {
       type,
       reservationId,
       trailerId,
-      deviceId,              // klidně pak schováme ve frontendu; pro debug je super
+      deviceId, // pro debug super
       pin: pinResponse.pin,
       pinId: pinResponse.pinId || null,
       startAt,
@@ -152,6 +173,131 @@ app.post("/api/reservations/createPin", async (req, res) => {
   }
 });
 
+// POST /api/reservations/:id/refreshPin
+// body: { trailerId, windowMinutes? }  (windowMinutes volitelné, default 5)
+app.post("/api/reservations/:id/refreshPin", async (req, res) => {
+  try {
+    const reservationId = Number(req.params.id);
+    const trailerId = Number(req.body?.trailerId);
+
+    if (!reservationId) return res.status(400).json({ error: "Neplatné reservationId" });
+    if (!trailerId) return res.status(400).json({ error: "Chybí trailerId" });
+
+    const minutes = Number(req.body?.windowMinutes || process.env.PIN_WINDOW_MINUTES || 5);
+    const windowMin = Number.isFinite(minutes) && minutes > 0 ? minutes : 5;
+
+    // 1) Najdi aktivní zámek k vleku
+    const lock = await knex("locks")
+      .where({ trailer_id: trailerId, active: 1 })
+      .first();
+
+    if (!lock) {
+      return res.status(404).json({
+        error: "K tomuto vleku není přiřazen aktivní zámek",
+        trailerId,
+      });
+    }
+
+    const deviceId = lock.device_id;
+
+    // 1.5) Najdi předchozí aktivní PIN (pro zjištění, jestli se změnil)
+    const prev = await knex("pins")
+      .where({ reservationId })
+      .whereNull("deletedAt")
+      .orderBy("id", "desc")
+      .first();
+
+    const prevPin = prev?.pin || null;
+
+    // 2) Zneplatni staré piny pro rezervaci (soft delete)
+    await knex("pins")
+      .where({ reservationId })
+      .whereNull("deletedAt")
+      .update({ deletedAt: knex.fn.now() });
+
+    // 3) Vytvoř nový krátký pin na okno X minut od teď
+    const start = new Date();
+    const end = new Date(start.getTime() + windowMin * 60 * 1000);
+
+    // Igloohome chce startDate na celou hodinu
+    const iglooStart = floorToHour(start);
+
+    // OneTime pin: API si vezme startDate (na hodinu) a pin je krátký (variance)
+    const variance = 1 + Math.floor(Math.random() * 5); // 1..5
+
+    console.log(
+      "refreshPin iglooStart:",
+      iglooStart.toISOString(),
+      "variance:",
+      variance,
+      "deviceId:",
+      deviceId
+    );
+
+    let pinResponse;
+    let attempts = 0;
+
+    while (attempts < 5) {
+      attempts++;
+
+      try {
+        pinResponse = await createOneTimePin({
+          deviceId,
+          startDate: iglooStart,
+          accessName: `Reservation ${reservationId} (refresh ${Date.now()} #${attempts})`,
+          variance,
+        });
+      } catch (e) {
+        console.warn("⚠️ Igloo unavailable, using MOCK pin fallback");
+        pinResponse = { pin: randomPin(6), pinId: null, mock: true };
+      }
+
+      // vynutit rozdíl oproti předchozímu aktivnímu PINu
+      if (!prevPin || String(pinResponse.pin) !== String(prevPin)) break;
+    }
+
+    if (prevPin && String(pinResponse.pin) === String(prevPin)) {
+      return res.status(500).json({
+        error: "Nepodařilo se vygenerovat nový PIN (opakovaně stejný jako předchozí)",
+      });
+    }
+
+    // 4) Ulož nový PIN do DB (pins)
+await knex("pins").insert({
+  reservationId,
+  deviceId,
+  pin: String(pinResponse.pin),
+  pinId: pinResponse.pinId || null,
+  type: "onetime",
+  startAt: start,
+  endAt: end,
+  deletedAt: null,
+});
+
+    res.set("Cache-Control", "no-store");
+
+    return res.json({
+      ok: true,
+      source: "vleky-backend/index.js",
+      reservationId,
+      trailerId,
+      deviceId,
+      pin: pinResponse.pin,
+      pinId: pinResponse.pinId || null,
+      startAt: start.toISOString(),
+      endAt: end.toISOString(),
+
+      // info pro UI/debug
+      previousPin: prevPin,
+      changed: prevPin ? String(prevPin) !== String(pinResponse.pin) : true,
+    });
+  } catch (err) {
+    console.log("refreshPin error details raw:", err?.response?.data || err);
+    const details = err.response?.data || err.message || err;
+    console.error("❌ Error in /api/reservations/:id/refreshPin:", details);
+    return res.status(500).json({ error: "Nepodařilo se obnovit PIN", details });
+  }
+});
 
 // GET /api/reservations/:id/pin – načtení PINu z DB
 app.get("/api/reservations/:id/pin", async (req, res) => {
@@ -161,6 +307,7 @@ app.get("/api/reservations/:id/pin", async (req, res) => {
     const pinEntry = await knex("pins")
       .where({ reservationId: id })
       .whereNull("deletedAt")
+      .orderBy("id", "desc")
       .first();
 
     if (!pinEntry) {
@@ -260,34 +407,35 @@ app.get("/api/rentals/:id", async (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 });
+
 // =======================
 // LOCKS (zámky pro vleky)
 // =======================
 
 // Přidat / změnit zámek na vleku
 // Body: { provider: "igloohome", device_id: "xxxx", name: "Zámek 1", active: true }
-app.post('/api/trailers/:id/lock', async (req, res) => {
+app.post("/api/trailers/:id/lock", async (req, res) => {
   try {
     const trailerId = Number(req.params.id);
-    if (!trailerId) return res.status(400).json({ error: 'Neplatné trailer id' });
+    if (!trailerId) return res.status(400).json({ error: "Neplatné trailer id" });
 
     const b = req.body || {};
-    const provider = (b.provider || 'igloohome').toString();
-    const deviceId = (b.device_id || '').toString().trim();
+    const provider = (b.provider || "igloohome").toString();
+    const deviceId = (b.device_id || "").toString().trim();
     const name = b.name ? String(b.name) : null;
     const active = (b.active === undefined) ? true : !!b.active;
 
-    if (!deviceId) return res.status(400).json({ error: 'Chybí device_id' });
+    if (!deviceId) return res.status(400).json({ error: "Chybí device_id" });
 
     // ověříme, že vlek existuje
-    const trailer = await knex('trailers').where({ id: trailerId }).first();
-    if (!trailer) return res.status(404).json({ error: 'Vlek nenalezen' });
+    const trailer = await knex("trailers").where({ id: trailerId }).first();
+    if (!trailer) return res.status(404).json({ error: "Vlek nenalezen" });
 
     // UPSERT: pokud už lock pro trailer existuje -> update, jinak insert
-    const existing = await knex('locks').where({ trailer_id: trailerId }).first();
+    const existing = await knex("locks").where({ trailer_id: trailerId }).first();
 
     if (existing) {
-      await knex('locks').where({ trailer_id: trailerId }).update({
+      await knex("locks").where({ trailer_id: trailerId }).update({
         provider,
         device_id: deviceId,
         name,
@@ -295,7 +443,7 @@ app.post('/api/trailers/:id/lock', async (req, res) => {
         updated_at: knex.fn.now()
       });
     } else {
-      await knex('locks').insert({
+      await knex("locks").insert({
         trailer_id: trailerId,
         provider,
         device_id: deviceId,
@@ -304,42 +452,41 @@ app.post('/api/trailers/:id/lock', async (req, res) => {
       });
     }
 
-    const saved = await knex('locks').where({ trailer_id: trailerId }).first();
+    const saved = await knex("locks").where({ trailer_id: trailerId }).first();
     return res.json({ ok: true, lock: saved });
   } catch (e) {
-    // typicky narazíš na UNIQUE constraint (device_id už použitý jinde)
     console.error(e);
-    return res.status(500).json({ error: 'Server error', details: e.message });
+    return res.status(500).json({ error: "Server error", details: e.message });
   }
 });
 
 // Získat zámek vleku
-app.get('/api/trailers/:id/lock', async (req, res) => {
+app.get("/api/trailers/:id/lock", async (req, res) => {
   try {
     const trailerId = Number(req.params.id);
-    if (!trailerId) return res.status(400).json({ error: 'Neplatné trailer id' });
+    if (!trailerId) return res.status(400).json({ error: "Neplatné trailer id" });
 
-    const lock = await knex('locks').where({ trailer_id: trailerId }).first();
-    if (!lock) return res.status(404).json({ error: 'Zámek nepřiřazen' });
+    const lock = await knex("locks").where({ trailer_id: trailerId }).first();
+    if (!lock) return res.status(404).json({ error: "Zámek nepřiřazen" });
 
     return res.json(lock);
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ error: 'Server error' });
+    return res.status(500).json({ error: "Server error" });
   }
 });
 
 // Odebrat zámek z vleku
-app.delete('/api/trailers/:id/lock', async (req, res) => {
+app.delete("/api/trailers/:id/lock", async (req, res) => {
   try {
     const trailerId = Number(req.params.id);
-    if (!trailerId) return res.status(400).json({ error: 'Neplatné trailer id' });
+    if (!trailerId) return res.status(400).json({ error: "Neplatné trailer id" });
 
-    const deleted = await knex('locks').where({ trailer_id: trailerId }).del();
+    const deleted = await knex("locks").where({ trailer_id: trailerId }).del();
     return res.json({ ok: true, deleted });
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ error: 'Server error' });
+    return res.status(500).json({ error: "Server error" });
   }
 });
 
@@ -348,9 +495,9 @@ app.delete('/api/trailers/:id/lock', async (req, res) => {
 // =======================
 
 // GET /trailers - seznam vleků
-app.get('/trailers', async (req, res) => {
+app.get("/trailers", async (req, res) => {
   try {
-    const rows = await knex('trailers').select('*').orderBy('id', 'desc');
+    const rows = await knex("trailers").select("*").orderBy("id", "desc");
 
     // photos_json -> photos (pole)
     const data = rows.map(r => ({
@@ -361,20 +508,20 @@ app.get('/trailers', async (req, res) => {
     res.json(data);
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
 // POST /trailers - vytvořit vlek (JSON body)
-app.post('/trailers', async (req, res) => {
+app.post("/trailers", async (req, res) => {
   try {
     const b = req.body || {};
-    if (!b.name || String(b.name).trim() === '') {
-      return res.status(400).json({ error: 'Chybí name' });
+    if (!b.name || String(b.name).trim() === "") {
+      return res.status(400).json({ error: "Chybí name" });
     }
 
     const photos = Array.isArray(b.photos) ? b.photos : [];
-    const [id] = await knex('trailers').insert({
+    const [id] = await knex("trailers").insert({
       name: b.name,
 
       total_weight_kg: b.total_weight_kg ?? b.totalWeightKg ?? null,
@@ -397,22 +544,22 @@ app.post('/trailers', async (req, res) => {
       rental_id: b.rental_id ?? null
     });
 
-    const created = await knex('trailers').where({ id }).first();
+    const created = await knex("trailers").where({ id }).first();
     res.json({
       ...created,
       photos: created.photos_json ? JSON.parse(created.photos_json) : []
     });
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: 'Server error', details: e.message });
+    res.status(500).json({ error: "Server error", details: e.message });
   }
 });
 
 // PUT /trailers/:id - upravit vlek
-app.put('/trailers/:id', async (req, res) => {
+app.put("/trailers/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
-    if (!id) return res.status(400).json({ error: 'Neplatné ID' });
+    if (!id) return res.status(400).json({ error: "Neplatné ID" });
 
     const b = req.body || {};
     const photos = Array.isArray(b.photos) ? b.photos : undefined;
@@ -438,17 +585,17 @@ app.put('/trailers/:id', async (req, res) => {
       rental_id: b.rental_id
     };
 
-    // vyhoď undefined hodnoty (aby se nepřepisovalo na null omylem)
+    // vyhoď undefined hodnoty
     Object.keys(patch).forEach(k => patch[k] === undefined && delete patch[k]);
 
     if (photos !== undefined) {
       patch.photos_json = JSON.stringify(photos);
     }
 
-    await knex('trailers').where({ id }).update({ ...patch, updated_at: knex.fn.now() });
+    await knex("trailers").where({ id }).update({ ...patch, updated_at: knex.fn.now() });
 
-    const updated = await knex('trailers').where({ id }).first();
-    if (!updated) return res.status(404).json({ error: 'Nenalezeno' });
+    const updated = await knex("trailers").where({ id }).first();
+    if (!updated) return res.status(404).json({ error: "Nenalezeno" });
 
     res.json({
       ...updated,
@@ -456,21 +603,21 @@ app.put('/trailers/:id', async (req, res) => {
     });
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: 'Server error', details: e.message });
+    res.status(500).json({ error: "Server error", details: e.message });
   }
 });
 
 // DELETE /trailers/:id - smazat vlek
-app.delete('/trailers/:id', async (req, res) => {
+app.delete("/trailers/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
-    if (!id) return res.status(400).json({ error: 'Neplatné ID' });
+    if (!id) return res.status(400).json({ error: "Neplatné ID" });
 
-    const deleted = await knex('trailers').where({ id }).del();
+    const deleted = await knex("trailers").where({ id }).del();
     res.json({ ok: true, deleted });
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
@@ -478,7 +625,3 @@ app.delete('/trailers/:id', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server běží na http://localhost:${PORT}`);
 });
-// ===============================
-// PŘIŘAZENÍ ZÁMKU K VLEKU
-// ===============================
-

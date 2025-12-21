@@ -141,6 +141,8 @@ router.post("/reservations/:id/refreshPin", async (req, res) => {
     const endRaw = new Date(startRaw.getTime() + minutes * 60 * 1000);
     const iglooStart = floorToHour(startRaw);
 
+    
+
     await softDeletePinsForReservation(rid);
 
     const variance = 1 + Math.floor(Math.random() * 5); // 1..5
@@ -151,6 +153,7 @@ router.post("/reservations/:id/refreshPin", async (req, res) => {
       variance,
     });
 
+    
     await knex("pins").insert({
       reservationId: rid,
       deviceId,
