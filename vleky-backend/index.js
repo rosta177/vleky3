@@ -392,6 +392,8 @@ app.get("/api/rentals/:id", async (req, res) => {
 // LOCKS
 // =======================
 
+// Přidat / změnit zámek na vleku
+// Body: { provider: "igloohome", device_id: "xxxx", name: "Zámek 1", active: true, force?: true }
 app.post("/api/trailers/:id/lock", async (req, res) => {
   try {
     const trailerId = Number(req.params.id);
@@ -401,13 +403,59 @@ app.post("/api/trailers/:id/lock", async (req, res) => {
     const provider = (b.provider || "igloohome").toString();
     const deviceId = (b.device_id || "").toString().trim();
     const name = b.name ? String(b.name) : null;
-    const active = b.active === undefined ? true : !!b.active;
+    const active = (b.active === undefined) ? true : !!b.active;
+    const force = !!b.force; // <-- POTVRZENÍ PŘESUNU Z UI
 
     if (!deviceId) return res.status(400).json({ error: "Chybí device_id" });
 
+    // ověříme, že vlek existuje
     const trailer = await knex("trailers").where({ id: trailerId }).first();
     if (!trailer) return res.status(404).json({ error: "Vlek nenalezen" });
 
+    // 1) Je tenhle device už přiřazený někde jinde?
+    const byDevice = await knex("locks")
+      .where({ provider, device_id: deviceId })
+      .first();
+
+    // Pokud device existuje a patří jinému vleku a není force -> vrať 409 + info
+    if (byDevice && Number(byDevice.trailer_id) !== trailerId && !force) {
+      const otherTrailer = await knex("trailers")
+        .where({ id: byDevice.trailer_id })
+        .first();
+
+      return res.status(409).json({
+        error: "LOCK_ALREADY_ASSIGNED",
+        device_id: deviceId,
+        provider,
+        currentTrailer: otherTrailer
+          ? { id: otherTrailer.id, name: otherTrailer.name }
+          : { id: byDevice.trailer_id, name: null },
+      });
+    }
+
+    // 2) Pokud device existuje a force=true -> PŘESUN
+    if (byDevice && Number(byDevice.trailer_id) !== trailerId && force) {
+      // zajistíme 1 trailer -> max 1 lock: smaž případný jiný lock na cílovém traileru
+      await knex("locks")
+        .where({ trailer_id: trailerId })
+        .whereNot({ id: byDevice.id })
+        .del();
+
+      // přepoj device na tento trailer
+      await knex("locks")
+        .where({ id: byDevice.id })
+        .update({
+          trailer_id: trailerId,
+          name,
+          active,
+          updated_at: knex.fn.now(),
+        });
+
+      const saved = await knex("locks").where({ id: byDevice.id }).first();
+      return res.json({ ok: true, lock: saved, moved: true });
+    }
+
+    // 3) Standardní upsert (device neexistuje, nebo už patří tomuhle traileru)
     const existing = await knex("locks").where({ trailer_id: trailerId }).first();
 
     if (existing) {
@@ -419,16 +467,23 @@ app.post("/api/trailers/:id/lock", async (req, res) => {
         updated_at: knex.fn.now(),
       });
     } else {
-      await knex("locks").insert({ trailer_id: trailerId, provider, device_id: deviceId, name, active });
+      await knex("locks").insert({
+        trailer_id: trailerId,
+        provider,
+        device_id: deviceId,
+        name,
+        active,
+      });
     }
 
     const saved = await knex("locks").where({ trailer_id: trailerId }).first();
-    return res.json({ ok: true, lock: saved });
+    return res.json({ ok: true, lock: saved, moved: false });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "Server error", details: e.message });
   }
 });
+
 
 app.get("/api/trailers/:id/lock", async (req, res) => {
   try {
