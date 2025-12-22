@@ -10,12 +10,11 @@ yarn-error.log*
 # Environment proměnné
 # ========================
 .env
-.env.local
-.env.development
-.env.production
+.env.*
+!.env.example
 
 # ========================
-# Databáze (pokud je lokální)
+# Databáze (lokální / dev)
 # ========================
 *.sqlite
 *.sqlite3
@@ -27,6 +26,8 @@ yarn-error.log*
 dist/
 build/
 .cache/
+.vite/
+.eslintcache
 
 # ========================
 # OS / editor bordel
