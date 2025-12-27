@@ -1,7 +1,12 @@
-// index.js
+// index.js (opraveno)
+// - reverse: kontrola MAPY_API_KEY + log + validace + akceptuje lon i lng
+// - reverse: používá lon=... (ne lng) v requestu na Mapy
+// - igloo/devices: odstraněno duplicitní dotenv (už je nahoře)
+// - drobnosti: bezpečnější host/protocol (fallback), lepší error výpis
 
 const express = require("express");
 const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, ".env") });
 const fs = require("fs");
 const multer = require("multer");
 const cors = require("cors");
@@ -95,6 +100,187 @@ app.get("/api/health", (req, res) => {
 });
 
 // =======================
+// MAPY.COM TILES PROXY (Leaflet)
+// =======================
+
+const MAPY_API_KEY = process.env.MAPY_API_KEY;
+
+// Cache pro tile URL šablonu (abychom nevolali tiles.json pořád dokola)
+const mapyTileTemplateCache = new Map();
+// key: `${mapset}|${tileSize}|${lang}` -> { template: string, expiresAt: number }
+
+async function getMapyTileTemplate({ mapset, tileSize, lang }) {
+  const key = `${mapset}|${tileSize}|${lang}`;
+  const now = Date.now();
+
+  const cached = mapyTileTemplateCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.template;
+
+  if (!MAPY_API_KEY) {
+    throw new Error("Chybí MAPY_API_KEY v vleky-backend/.env");
+  }
+
+  const tilejsonUrl =
+    `https://api.mapy.com/v1/maptiles/${encodeURIComponent(mapset)}/tiles.json` +
+    `?apikey=${encodeURIComponent(MAPY_API_KEY)}` +
+    `&tileSize=${encodeURIComponent(tileSize)}` +
+    `&lang=${encodeURIComponent(lang)}`;
+
+  const r = await fetch(tilejsonUrl);
+  if (!r.ok) throw new Error(`Mapy tiles.json selhalo: HTTP ${r.status}`);
+  const j = await r.json();
+
+  const template = j?.tiles?.[0];
+  if (!template) throw new Error("tiles.json nevrátilo tiles[0] template");
+
+  // cache na 10 minut
+  mapyTileTemplateCache.set(key, { template, expiresAt: now + 10 * 60 * 1000 });
+  return template;
+}
+
+// =======================
+// MAPY.COM GEOCODE / REVERSE (proxy, klíč zůstává v backendu)
+// =======================
+
+app.get("/api/mapy/geocode", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    if (!q) return res.status(400).json({ error: "Chybí parametr q" });
+    if (!MAPY_API_KEY) return res.status(500).json({ error: "Chybí MAPY_API_KEY v .env" });
+
+    const url =
+      `https://api.mapy.com/v1/geocode?` +
+      `query=${encodeURIComponent(q)}` +
+      `&lang=cs` +
+      `&limit=5` +
+      `&apikey=${encodeURIComponent(MAPY_API_KEY)}`;
+
+    const r = await fetch(url);
+    const raw = await r.json().catch(() => null);
+    if (!r.ok) return res.status(502).json({ error: "Mapy geocode failed", status: r.status, data: raw });
+
+    const items = Array.isArray(raw?.items) ? raw.items : [];
+    const out = items
+      .map((it) => {
+        const label = it?.name || it?.label || it?.formatted || it?.locality?.name || null;
+        const lat = it?.position?.lat ?? it?.lat ?? null;
+        const lon = it?.position?.lon ?? it?.lon ?? it?.lng ?? null;
+        if (label && Number.isFinite(Number(lat)) && Number.isFinite(Number(lon))) {
+          return { label: String(label), lat: Number(lat), lon: Number(lon) };
+        }
+        return null;
+      })
+      .filter(Boolean);
+
+    return res.json({ items: out });
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Geocode error" });
+  }
+});
+
+app.get("/api/mapy/reverse", async (req, res) => {
+  try {
+    if (!MAPY_API_KEY) return res.status(500).json({ error: "Chybí MAPY_API_KEY v .env" });
+
+    const latRaw = String(req.query.lat ?? "").trim().replace(",", ".");
+    const lonRaw = String(req.query.lon ?? req.query.lng ?? "").trim().replace(",", ".");
+
+    const lat = Number(latRaw);
+    const lon = Number(lonRaw);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return res.status(400).json({ error: "Chybí nebo je špatně lat/lon", latRaw, lonRaw });
+    }
+
+    const qs = new URLSearchParams({
+      lat: String(lat),
+      lon: String(lon),
+      lang: "cs",
+      apikey: MAPY_API_KEY,
+    });
+
+    const url = `https://api.mapy.com/v1/rgeocode?${qs.toString()}`;
+
+    const r = await fetch(url);
+    const data = await r.json().catch(() => null);
+
+    if (!r.ok) {
+      return res.status(502).json({ error: "Mapy reverse geocode failed", status: r.status, url, data });
+    }
+
+    return res.json(data);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Reverse geocode error" });
+  }
+});
+
+
+
+
+// TileJSON bez klíče (tiles přepíšeme na naši proxy URL)
+app.get("/api/mapy/tilejson/:mapset", async (req, res) => {
+  try {
+    const mapset = String(req.params.mapset || "basic");
+    const tileSize = String(req.query.tileSize || "256");
+    const lang = String(req.query.lang || "cs");
+
+    if (!MAPY_API_KEY) return res.status(500).json({ error: "Chybí MAPY_API_KEY v .env" });
+
+    const tilejsonUrl =
+      `https://api.mapy.com/v1/maptiles/${encodeURIComponent(mapset)}/tiles.json` +
+      `?apikey=${encodeURIComponent(MAPY_API_KEY)}` +
+      `&tileSize=${encodeURIComponent(tileSize)}` +
+      `&lang=${encodeURIComponent(lang)}`;
+
+    const r = await fetch(tilejsonUrl);
+    if (!r.ok) return res.status(502).json({ error: `Mapy tiles.json HTTP ${r.status}` });
+
+    const j = await r.json();
+
+    const host = req.get("host");
+    const proto = req.headers["x-forwarded-proto"] || req.protocol;
+
+    // přepiš tiles na naši proxy cestu (bez API klíče ve frontendu)
+    j.tiles = [
+      `${proto}://${host}/api/mapy/tiles/${encodeURIComponent(mapset)}/{z}/{x}/{y}.png?tileSize=${encodeURIComponent(
+        tileSize
+      )}&lang=${encodeURIComponent(lang)}`
+    ];
+
+    res.set("Cache-Control", "public, max-age=600");
+    return res.json(j);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "Mapy tilejson error" });
+  }
+});
+
+// Proxy dlaždic
+app.get("/api/mapy/tiles/:mapset/:z/:x/:y.png", async (req, res) => {
+  try {
+    const mapset = String(req.params.mapset || "basic");
+    const z = String(req.params.z);
+    const x = String(req.params.x);
+    const y = String(req.params.y);
+    const tileSize = String(req.query.tileSize || "256");
+    const lang = String(req.query.lang || "cs");
+
+    const template = await getMapyTileTemplate({ mapset, tileSize, lang });
+    const tileUrl = template.replace("{z}", z).replace("{x}", x).replace("{y}", y);
+
+    const r = await fetch(tileUrl);
+    if (!r.ok) return res.status(502).send(`Tile fetch failed: HTTP ${r.status}`);
+
+    res.set("Content-Type", r.headers.get("content-type") || "image/png");
+    res.set("Cache-Control", "public, max-age=86400");
+
+    const buf = Buffer.from(await r.arrayBuffer());
+    return res.send(buf);
+  } catch (e) {
+    return res.status(500).send(e?.message || "Mapy tile proxy error");
+  }
+});
+
+// =======================
 // RESERVATIONS / PINY
 // =======================
 
@@ -140,17 +326,16 @@ app.post("/api/reservations/createPin", async (req, res) => {
     if (diffMs <= oneDayMs) {
       type = "hourly";
       try {
-  pinResponse = await createHourlyPin({
-    deviceId,
-    startDate: start,
-    endDate: end,
-    accessName: `Reservation ${reservationId}`,
-  });
-} catch (e) {
-  console.warn("⚠️ createPin: Igloo unavailable, using MOCK pin");
-  pinResponse = { pin: randomPin(6), pinId: null, mock: true };
-}
-
+        pinResponse = await createHourlyPin({
+          deviceId,
+          startDate: start,
+          endDate: end,
+          accessName: `Reservation ${reservationId}`,
+        });
+      } catch (e) {
+        console.warn("⚠️ createPin: Igloo unavailable, using MOCK pin");
+        pinResponse = { pin: randomPin(6), pinId: null, mock: true };
+      }
     } else {
       type = "daily";
       const startOfDay = new Date(start.getFullYear(), start.getMonth(), start.getDate(), 0, 0, 0);
@@ -484,7 +669,6 @@ app.post("/api/trailers/:id/lock", async (req, res) => {
   }
 });
 
-
 app.get("/api/trailers/:id/lock", async (req, res) => {
   try {
     const trailerId = Number(req.params.id);
@@ -529,7 +713,7 @@ app.get("/trailers", async (req, res) => {
   }
 });
 
-// ✅ CHYBĚLO: GET /trailers/:id - detail vleku
+// GET /trailers/:id - detail vleku
 app.get("/trailers/:id", async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -641,11 +825,8 @@ app.delete("/trailers/:id", async (req, res) => {
 // =======================
 app.get("/api/igloo/devices", async (req, res) => {
   try {
-    // lazy require, aby se to nenatahovalo když to nechceš
     const axios = require("axios");
     const https = require("https");
-    const path = require("path");
-    require("dotenv").config({ path: path.join(__dirname, ".env") });
 
     const {
       IGLOO_CLIENT_ID,
@@ -700,3 +881,4 @@ app.get("/api/igloo/devices", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server běží na http://localhost:${PORT}`);
 });
+

@@ -32,19 +32,32 @@ export default function Reserve() {
 
     setLoading(true);
     try {
-      const res = await fetch("http://localhost:3100/api/reservations/createPin", {
+      // Správný endpoint z backendu: POST /api/reservations/:id/refreshPin
+      const res = await fetch(`http://localhost:3100/api/reservations/${reservationId}/refreshPin`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          reservationId,
           trailerId,
+          windowMinutes: 5,
           startAt: new Date(startAt).toISOString(),
           endAt: new Date(endAt).toISOString(),
         }),
       });
 
       const data = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+
+      // DEV fallback: když backend neumí PIN (nebo chybí zámek), dovolíme pokračovat s mock PINem
+      if (!res.ok) {
+        const msg = data?.error || `HTTP ${res.status}`;
+
+        // 404 = endpoint nenalezen / nebo jiný routing; text match = "chybí zámek" apod.
+        if (res.status === 404 || /zámek|zamek|lock|padlock|not found/i.test(msg)) {
+          setResult({ mock: true, pin: "1234", type: "mock" });
+          return;
+        }
+
+        throw new Error(msg);
+      }
 
       setResult(data);
     } catch (e: any) {
@@ -123,11 +136,10 @@ export default function Reserve() {
         )}
 
         {result?.mock && (
-  <div style={{ marginTop: 8, color: "#b45309", fontWeight: 700 }}>
-    ⚠️ Testovací PIN – zámek se neodemkne (mock)
-  </div>
-)}
-
+          <div style={{ marginTop: 8, color: "#b45309", fontWeight: 700 }}>
+            ⚠️ Testovací PIN – zámek se neodemkne (mock)
+          </div>
+        )}
 
         {result && (
           <div style={{ marginTop: 12 }}>
