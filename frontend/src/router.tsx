@@ -16,16 +16,19 @@ import OnboardingTest from "./views/admin/onboarding/OnboardingTest";
 
 export const router = createBrowserRouter([
   { path: "/", element: <Home /> },
+
+  // veřejná část
   { path: "/t/:id", element: <TrailerPublic /> },
   { path: "/t/:id/reserve", element: <Reserve /> },
 
+  // admin
   { path: "/admin/trailers", element: <AdminTrailers /> },
   { path: "/admin/trailers/:id", element: <AdminTrailerEdit /> },
 
-  // ONBOARDING FLOW
-  { path: "/admin/onboarding/start", element: <OnboardingStart /> },
+  // onboarding
+  { path: "/admin/onboarding", element: <OnboardingStart /> },
   { path: "/admin/onboarding/rental", element: <OnboardingRental /> },
   { path: "/admin/onboarding/trailer", element: <OnboardingTrailer /> },
-  { path: "/admin/onboarding/lock/:trailerId", element: <OnboardingLock /> },
-  { path: "/admin/onboarding/test/:trailerId", element: <OnboardingTest /> },
+  { path: "/admin/onboarding/lock", element: <OnboardingLock /> },
+  { path: "/admin/onboarding/test", element: <OnboardingTest /> },
 ]);
